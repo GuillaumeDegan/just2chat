@@ -1,16 +1,29 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { io } from "socket.io-client";
+import { v4 as uuidv4 } from "uuid";
 import { AppContext } from "../contexts/AppContext";
+import { socket } from "../socket";
 
 type Message = {
   id: string;
   message: string;
   senderId: string;
   timestamp: Date;
+  reactions?: {
+    type: MESSAGE_REACTIONS;
+    senderId: string;
+  }[];
 };
 
-const socket = io("http://localhost:3001");
+enum MESSAGE_REACTIONS {
+  LIKE = "LIKE",
+  LAUGH = "LAUGH",
+  WOW = "WOW",
+  SAD = "SAD",
+  ANGRY = "ANGRY",
+  SOB = "SOB",
+  VOMIT = "VOMIT",
+}
 
 function Chat() {
   const { selectedUserId } = useContext(AppContext);
@@ -26,22 +39,68 @@ function Chat() {
   const [messageList, setMessageList] = useState<Message[]>([]);
 
   const onSendMessage = () => {
-    console.log("📤 Envoi du message :", typedMessage);
-
+    const messageId = uuidv4();
     socket.emit("send-message", {
+      messageId,
       message: typedMessage,
       senderId: selectedUserId,
     });
     setMessageList((prevMessages) => [
       ...prevMessages,
       {
-        id: Date.now().toString(),
+        id: messageId,
         message: typedMessage,
         senderId: selectedUserId || "unknown",
         timestamp: new Date(),
       },
     ]);
     setTypedMessage("");
+  };
+
+  const setReactionInMessage = (
+    messageId: string,
+    reaction: MESSAGE_REACTIONS,
+    senderId: string
+  ) => {
+    setMessageList((prevMessages) =>
+      prevMessages.map((message) => {
+        if (message.id !== messageId) return message;
+
+        const existingReactions = message.reactions || [];
+        const existingReaction = existingReactions.find(
+          (r) => r.senderId === senderId
+        );
+
+        let newReactions;
+        if (existingReaction) {
+          if (existingReaction.type === reaction) {
+            // Same reaction: remove it (toggle off)
+            newReactions = existingReactions.filter(
+              (r) => r.senderId !== senderId
+            );
+          } else {
+            // Different reaction: replace it
+            newReactions = existingReactions.map((r) =>
+              r.senderId === senderId ? { ...r, type: reaction } : r
+            );
+          }
+        } else {
+          // No existing reaction: add it
+          newReactions = [...existingReactions, { type: reaction, senderId }];
+        }
+
+        return { ...message, reactions: newReactions };
+      })
+    );
+  };
+
+  const onReactToMessage = (messageId: string, reaction: MESSAGE_REACTIONS) => {
+    socket.emit("react-to-message", {
+      messageId,
+      reaction,
+      senderId: selectedUserId || "unknown",
+    });
+    setReactionInMessage(messageId, reaction, selectedUserId || "unknown");
   };
 
   const onGoBack = () => {
@@ -78,6 +137,10 @@ function Chat() {
       return;
     }
 
+    if (!socket.connected) {
+      socket.connect();
+    }
+
     socket.emit("user-connected", selectedUserId);
     setOnlineStatus((prev) => ({
       ...prev,
@@ -85,7 +148,6 @@ function Chat() {
     }));
 
     socket.on("users-status", (usersOnline: string[]) => {
-      console.log("users-status", usersOnline);
       setOnlineStatus({
         user1: usersOnline.includes("user1"),
         user2: usersOnline.includes("user2"),
@@ -99,6 +161,17 @@ function Chat() {
         setOtherUserIsTyping(true);
       }
     });
+
+    socket.on(
+      "message-reacted",
+      (data: {
+        messageId: string;
+        reaction: MESSAGE_REACTIONS;
+        senderId: string;
+      }) => {
+        setReactionInMessage(data.messageId, data.reaction, data.senderId);
+      }
+    );
 
     socket.on("user-stopped-typing", (userId: string) => {
       if (userId === selectedUserId) {
@@ -129,9 +202,12 @@ function Chat() {
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
       }
-      socket.off("user-status");
-      socket.off("receive-message");
       socket.off("users-status");
+      socket.off("user-typing");
+      socket.off("user-stopped-typing");
+      socket.off("message-reacted");
+      socket.off("receive-message");
+      socket.off("connect_error");
     };
   }, []);
 
@@ -144,11 +220,22 @@ function Chat() {
       <button onClick={onGoBack}>Retour</button>
       <div style={{ gap: 4 }}>
         {messageList.map((message) => (
-          <div key={message.id} style={{ backgroundColor: "black" }}>
+          <div
+            key={message.id}
+            style={{ backgroundColor: "black" }}
+            onClick={() =>
+              onReactToMessage(message.id, MESSAGE_REACTIONS.ANGRY)
+            }
+          >
             <p>
               <strong>{message.senderId}</strong>: {message.message}
             </p>
             <small>{message.timestamp.toLocaleTimeString()}</small>
+            {message.reactions?.map((r, i) => (
+              <p key={i}>
+                {r.type} : {r.senderId}
+              </p>
+            ))}
           </div>
         ))}
       </div>
